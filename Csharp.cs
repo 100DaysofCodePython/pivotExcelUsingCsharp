@@ -1,5 +1,5 @@
-// Requires reference: Microsoft.Office.Interop.Excel
-// Target .NET Framework (e.g., 4.7.2 or 4.8). Run on Windows with Excel installed (x64).
+// Requires reference to Microsoft.Office.Interop.Excel
+// Target .NET Framework (e.g., 4.7.2 or 4.8). Run on Windows with Excel installed (x64 recommended).
 
 using System;
 using System.Data;
@@ -7,48 +7,42 @@ using System.IO;
 using System.Runtime.InteropServices;
 using Excel = Microsoft.Office.Interop.Excel;
 
-namespace PivotDistinctFixed
+namespace DataModelPivotFinal
 {
     class Program
     {
         static void Main(string[] args)
         {
-            // For quick testing use sample data. Replace with your real DataTable as needed.
+            // Build or get your DataTable here. Replace GetSampleDataTable() with real source.
             DataTable dt = GetSampleDataTable();
-
-            CreatePivotReport(dt);
-            Console.WriteLine("Done. Check output folder.");
+            CreatePivotReport_DataModel(dt,
+                outputFolder: @"C:\Reports\Pivot\",
+                outputBaseFileName: "Monthly Application Onboarding Report",
+                tableName: "ApplicationsTbl"   // <-- user-chosen table name (one-word)
+            );
         }
 
-        public static void CreatePivotReport(DataTable dt)
+        public static void CreatePivotReport_DataModel(DataTable dt, string outputFolder, string outputBaseFileName, string tableName)
         {
-            if (dt == null || dt.Rows.Count == 0)
-            {
-                Console.WriteLine("DT is null or empty.");
-                return;
-            }
+            if (dt == null || dt.Rows.Count == 0) throw new ArgumentException("DataTable is null or empty.");
 
-            // === Configurable items ===
-            string folder = @"C:\Reports\Pivot\";
-            Directory.CreateDirectory(folder);
-            string timeStamp = DateTime.Now.ToString("yyyyMMdd_HHmmss");
-            string outputFile = Path.Combine(folder, $"Monthly Application Onboarding Report_{timeStamp}.xlsx");
-
-            string dataSheetName = "Data";
+            // Configs (adjust if needed)
+            string dateCol = "AppliedOn";
+            string appIdCol = "ApplicationID";
+            string appNameCol = "ApplicationName";
+            string categoryCol = "Category";
+            string monthKeyCol = "ApplicationMonth"; // helper column
             string reportSheetName = "Report";
-            string tableName = "tblData";
+            string dataSheetName = "Data";
             string pivotName = "MonthlyPivot";
-            string pivotStartCell = "A7"; // on Report sheet
+            string pivotStartCell = "A7";
             string titleCell = "A5";
             string titleText = "Monthly Application Onboarding Report";
             string footerText = "Internal";
 
-            // Column names in your DataTable (must match exactly)
-            string dateCol = "AppliedOn";          // must be DateTime-compatible
-            string appIdCol = "ApplicationID";     // distinct count on this
-            string appNameCol = "ApplicationName";
-            string categoryCol = "Category";
-            string monthKeyCol = "ApplicationMonth"; // helper column we will add
+            Directory.CreateDirectory(outputFolder);
+            string timestamp = DateTime.Now.ToString("yyyyMMdd_HHmmss");
+            string outputFile = Path.Combine(outputFolder, $"{outputBaseFileName}_{timestamp}.xlsx");
 
             Excel.Application excelApp = null;
             Excel.Workbook workbook = null;
@@ -57,39 +51,39 @@ namespace PivotDistinctFixed
 
             try
             {
-                // 1) Prepare dt copy and add ApplicationMonth helper column (MMM-yyyy)
+                // 1) Prepare DataTable copy and add month helper column (string "MMM-yyyy")
                 DataTable dt2 = dt.Copy();
                 if (!dt2.Columns.Contains(monthKeyCol))
                     dt2.Columns.Add(monthKeyCol, typeof(string));
 
-                for (int i = 0; i < dt2.Rows.Count; i++)
+                for (int r = 0; r < dt2.Rows.Count; r++)
                 {
-                    var v = dt2.Rows[i][dateCol];
-                    if (v == DBNull.Value || v == null)
+                    var raw = dt2.Rows[r][dateCol];
+                    if (raw == DBNull.Value || raw == null)
                     {
-                        dt2.Rows[i][monthKeyCol] = "";
+                        dt2.Rows[r][monthKeyCol] = "";
                         continue;
                     }
                     DateTime d;
-                    if (v is DateTime) d = (DateTime)v;
-                    else if (!DateTime.TryParse(v.ToString(), out d)) d = DateTime.MinValue;
-
-                    dt2.Rows[i][monthKeyCol] = d == DateTime.MinValue ? "" : d.ToString("MMM-yyyy"); // "Jan-2025"
+                    if (raw is DateTime) d = (DateTime)raw;
+                    else if (!DateTime.TryParse(raw.ToString(), out d)) d = DateTime.MinValue;
+                    dt2.Rows[r][monthKeyCol] = d == DateTime.MinValue ? "" : d.ToString("MMM-yyyy");
                 }
 
-                // 2) Start Excel and workbook
+                // 2) Start Excel
                 excelApp = new Excel.Application
                 {
                     Visible = false,
                     DisplayAlerts = false
                 };
+
                 workbook = excelApp.Workbooks.Add();
                 dataSheet = (Excel.Worksheet)workbook.Worksheets[1];
                 dataSheet.Name = dataSheetName;
 
-                // 3) Write header row (row 3) and data starting row 4
+                // 3) Write headers at row 3 and data from row 4 in one shot (fast)
                 int headerRow = 3;
-                int dataStartRow = 4;
+                int dataStartRow = headerRow + 1;
                 int cols = dt2.Columns.Count;
                 int rows = dt2.Rows.Count;
 
@@ -99,7 +93,6 @@ namespace PivotDistinctFixed
                     ((Excel.Range)dataSheet.Cells[headerRow, c + 1]).Font.Bold = true;
                 }
 
-                // 4) Build object[,] and write in one shot
                 object[,] arr = new object[rows, cols];
                 for (int r = 0; r < rows; r++)
                     for (int c = 0; c < cols; c++)
@@ -111,84 +104,98 @@ namespace PivotDistinctFixed
                 writeRange.Value2 = arr;
                 dataSheet.Columns.AutoFit();
 
-                // 5) Create a ListObject (Excel Table) covering header+data
-                string lastColLetter = GetExcelColumnName(cols);
-                string tableAddress = $"A{headerRow}:{lastColLetter}{headerRow + rows}";
+                // 4) Create ListObject (Excel Table) for the range (header + data)
+                string lastCol = GetExcelColumnName(cols);
+                string tableAddress = $"A{headerRow}:{lastCol}{headerRow + rows}";
                 Excel.Range tableRange = dataSheet.Range[tableAddress];
 
-                Excel.ListObject lo = dataSheet.ListObjects.Add(
+                Excel.ListObject listObj = dataSheet.ListObjects.Add(
                     Excel.XlListObjectSourceType.xlSrcRange,
                     tableRange,
                     Type.Missing,
                     Excel.XlYesNoGuess.xlYes,
                     Type.Missing);
 
-                // ensure unique table name
-                try { lo.Name = tableName; } catch { lo.Name = tableName + "_" + DateTime.Now.ToString("yyyyMMddHHmmss"); }
+                // ensure table has the requested name, or append timestamp if exists
+                try { listObj.Name = tableName; } catch { listObj.Name = tableName + "_" + DateTime.Now.ToString("yyyyMMddHHmmss"); }
 
-                // 6) Save workbook first (important — workbook.FullName will be populated)
-                // Save as XLSX
+                // 5) Save workbook first — important so workbook.FullName exists for connection
                 workbook.SaveAs(outputFile, Excel.XlFileFormat.xlOpenXMLWorkbook);
-                // Now workbook.FullName is valid and file exists on disk.
 
-                // 7) Create a workbook connection pointing to that table and promote to Data Model
+                // 6) Create a Workbook Connection referencing the table and promote to Data Model
                 Excel.WorkbookConnections connections = workbook.Connections;
-                string connName = "DataModelConnection_" + DateTime.Now.ToString("yyyyMMddHHmmss");
-
+                string connName = "Conn_" + tableName + "_" + DateTime.Now.ToString("yyyyMMddHHmmss");
                 Excel.WorkbookConnection conn = null;
+
                 try
                 {
+                    // Add2 is preferred
                     conn = connections.Add2(
                         connName,
-                        "Connection for Data Model (table)",
+                        "Data Model connection",
                         $"WORKSHEET;{workbook.FullName}",
-                        lo.Name,
+                        listObj.Name,
                         (int)Excel.XlCmdType.xlCmdExcel);
                 }
                 catch
                 {
-                    // fallback to Add if Add2 not available
-                    conn = connections.Add(connName, "Connection (fallback)", $"WORKSHEET;{workbook.FullName}", lo.Name);
+                    // fallback to Add
+                    conn = connections.Add(connName, "Data Model connection (fallback)", $"WORKSHEET;{workbook.FullName}", listObj.Name);
                 }
 
-                // Attempt to set ModelTableName - if permitted this helps promote to the Data Model
-                try { conn.ModelTableName = lo.Name; } catch { /* ignore if not supported */ }
+                // Try to promote to data model by setting ModelTableName
+                try
+                {
+                    conn.ModelTableName = listObj.Name;
+                }
+                catch
+                {
+                    // some builds do not allow direct setting; it's okay — Excel may still add the model table
+                }
 
-                // 8) Create a PivotCache as external using the connection name/object
+                // Small pause can help Excel process the connection
+                System.Threading.Thread.Sleep(400);
+
+                // 7) Create PivotCache as external using the connection. Use conn object or name
                 Excel.PivotCaches pivotCaches = workbook.PivotCaches();
                 Excel.PivotCache pc = null;
                 try
                 {
-                    // Preferred: use the connection object
                     pc = pivotCaches.Create(Excel.XlPivotTableSourceType.xlExternal, conn, Excel.XlPivotTableVersionList.xlPivotTableVersion15);
                 }
                 catch
                 {
-                    // Fallback: pass connection name string if object fails
-                    pc = pivotCaches.Create(Excel.XlPivotTableSourceType.xlExternal, conn.Name, Excel.XlPivotTableVersionList.xlPivotTableVersion15);
+                    // fallback: pass connection name
+                    try
+                    {
+                        pc = pivotCaches.Create(Excel.XlPivotTableSourceType.xlExternal, conn.Name, Excel.XlPivotTableVersionList.xlPivotTableVersion15);
+                    }
+                    catch (Exception ex)
+                    {
+                        throw new Exception("Could not create PivotCache from connection. " + ex.Message);
+                    }
                 }
 
-                // 9) Create Report sheet and title
+                // 8) Create Report sheet and place pivot at A7
                 reportSheet = (Excel.Worksheet)workbook.Worksheets.Add(After: workbook.Worksheets[workbook.Worksheets.Count]);
                 reportSheet.Name = reportSheetName;
 
-                // Title at A5
                 reportSheet.Range[titleCell].Value2 = titleText;
                 reportSheet.Range[titleCell].Font.Bold = true;
                 reportSheet.Range[titleCell].Font.Size = 14;
                 reportSheet.Range[titleCell + ":" + "C5"].Merge();
                 reportSheet.Range[titleCell + ":" + "C5"].HorizontalAlignment = Excel.XlHAlign.xlHAlignCenter;
 
-                // 10) Create pivot table on Report sheet at A7
                 Excel.Range pivotDest = reportSheet.Range[pivotStartCell];
+
                 Excel.PivotTable pt = pc.CreatePivotTable(pivotDest, pivotName, Type.Missing, Excel.XlPivotTableVersionList.xlPivotTableVersion15);
 
-                // 11) Configure pivot fields and hierarchy
-                // Row1: ApplicationMonth (we created month string)
+                // 9) Configure Pivot fields:
+                // Row1: monthKeyCol
                 Excel.PivotField pfMonth = (Excel.PivotField)pt.PivotFields(monthKeyCol);
                 pfMonth.Orientation = Excel.XlPivotFieldOrientation.xlRowField;
                 pfMonth.Position = 1;
-                pfMonth.Caption = "Application Month"; // as requested
+                pfMonth.Caption = "Application Month"; // user requested caption
 
                 // Row2: ApplicationName
                 Excel.PivotField pfAppName = (Excel.PivotField)pt.PivotFields(appNameCol);
@@ -200,11 +207,11 @@ namespace PivotDistinctFixed
                 pfCategory.Orientation = Excel.XlPivotFieldOrientation.xlRowField;
                 pfCategory.Position = 3;
 
-                // Values: Distinct Count on ApplicationID
-                Excel.PivotField dataField = (Excel.PivotField)pt.AddDataField(pt.PivotFields(appIdCol), "Distinct Applications", Excel.XlConsolidationFunction.xlDistinctCount);
-                try { dataField.NumberFormat = "#,##0"; } catch { }
+                // 10) Add Distinct Count on ApplicationID (requires Data Model)
+                Excel.PivotField pfData = (Excel.PivotField)pt.AddDataField(pt.PivotFields(appIdCol), "Distinct Applications", Excel.XlConsolidationFunction.xlDistinctCount);
+                try { pfData.NumberFormat = "#,##0"; } catch { }
 
-                // 12) Layout and formatting
+                // 11) Layout & cosmetics
                 pt.RowAxisLayout(Excel.XlLayoutRowType.xlCompactRow);
                 pt.DisplayFieldCaptions = true;
                 pt.ShowDrillIndicators = true;
@@ -212,54 +219,60 @@ namespace PivotDistinctFixed
                 pt.RowGrand = true;
                 try { pt.TableStyle2 = "PivotStyleLight16"; } catch { }
 
-                // Attempt some Field formatting
+                // Hide subtotals for category level
                 try
                 {
-                    // Hide subtotal for category
                     pfCategory.Subtotals = new bool[] { false, false, false, false, false, false, false, false, false, false, false, false };
                 }
                 catch { }
 
-                // Indent (if supported)
+                // Indent category (if supported)
                 try { pfCategory.Indent = 2; } catch { }
 
-                // Repeat labels ON (if available)
+                // Repeat labels (if supported)
                 try { pt.RepeatAllLabels(Excel.XlPivotFieldOrientation.xlRowField); } catch { }
 
                 // Autofit report sheet columns
                 reportSheet.Columns.AutoFit();
 
-                // 13) Footer placement (F1 = last used row + 2)
-                int usedRows = reportSheet.UsedRange.Rows.Count;
-                int footerRow = usedRows + 2;
+                // Footer placement (F1): last used row + 2
+                int lastUsed = reportSheet.UsedRange.Rows.Count;
+                int footerRow = lastUsed + 2;
                 reportSheet.Cells[footerRow, 1] = footerText;
                 ((Excel.Range)reportSheet.Cells[footerRow, 1]).Font.Italic = true;
                 ((Excel.Range)reportSheet.Cells[footerRow, 1]).Font.Size = 10;
 
-                // 14) Refresh pivot and set refresh on open
+                // Refresh pivot and set refresh on open (best-effort)
                 try
                 {
                     pt.RefreshTable();
-                    // Set workbook to refresh all connections on open
                     workbook.RefreshAll();
                 }
                 catch { }
 
-                // 15) Save workbook (already saved earlier but final Save to ensure pivot parts are persisted)
+                // Save final workbook (ensures pivot parts persisted)
                 workbook.Save();
 
-                Console.WriteLine("File saved to: " + outputFile);
+                Console.WriteLine("Saved file: " + outputFile);
+            }
+            catch (COMException comEx)
+            {
+                Console.WriteLine("COM exception: " + comEx.Message);
+                Console.WriteLine(comEx.StackTrace);
+                throw;
             }
             catch (Exception ex)
             {
-                Console.WriteLine("ERROR: " + ex.Message);
+                Console.WriteLine("Exception: " + ex.Message);
                 Console.WriteLine(ex.StackTrace);
+                throw;
             }
             finally
             {
-                // Clean up COM objects
+                // Cleanup COM objects carefully
                 try { if (reportSheet != null) Marshal.FinalReleaseComObject(reportSheet); } catch { }
                 try { if (dataSheet != null) Marshal.FinalReleaseComObject(dataSheet); } catch { }
+
                 try
                 {
                     if (workbook != null)
@@ -270,6 +283,7 @@ namespace PivotDistinctFixed
                     }
                 }
                 catch { }
+
                 try
                 {
                     if (excelApp != null)
@@ -286,7 +300,7 @@ namespace PivotDistinctFixed
             }
         }
 
-        // Helper - Excel column label
+        // Helper: convert 1-based column index to Excel column letters
         private static string GetExcelColumnName(int columnNumber)
         {
             if (columnNumber < 1) throw new ArgumentOutOfRangeException(nameof(columnNumber));
@@ -301,7 +315,7 @@ namespace PivotDistinctFixed
             return columnName;
         }
 
-        // Sample data builder
+        // Sample DataTable for quick testing
         private static DataTable GetSampleDataTable()
         {
             DataTable dt = new DataTable();
