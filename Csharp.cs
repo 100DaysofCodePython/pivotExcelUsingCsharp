@@ -1,5 +1,5 @@
-// Requires reference to Microsoft.Office.Interop.Excel
-// Target .NET Framework (e.g., 4.7.2 or 4.8). Run on Windows with Excel installed (x64 recommended).
+// Requires reference: Microsoft.Office.Interop.Excel
+// Target .NET Framework (4.7.2 / 4.8). Run on Windows with Excel installed (x64 recommended).
 
 using System;
 using System.Data;
@@ -7,33 +7,37 @@ using System.IO;
 using System.Runtime.InteropServices;
 using Excel = Microsoft.Office.Interop.Excel;
 
-namespace DataModelPivotFinal
+namespace PivotDistinct_NoDataModel
 {
     class Program
     {
         static void Main(string[] args)
         {
-            // Build or get your DataTable here. Replace GetSampleDataTable() with real source.
+            // Sample data - replace with your real DataTable
             DataTable dt = GetSampleDataTable();
-            CreatePivotReport_DataModel(dt,
+
+            CreatePivotReportFromDistinct(dt,
                 outputFolder: @"C:\Reports\Pivot\",
-                outputBaseFileName: "Monthly Application Onboarding Report",
-                tableName: "ApplicationsTbl"   // <-- user-chosen table name (one-word)
-            );
+                baseFileName: "Monthly Application Onboarding Report");
         }
 
-        public static void CreatePivotReport_DataModel(DataTable dt, string outputFolder, string outputBaseFileName, string tableName)
+        public static void CreatePivotReportFromDistinct(DataTable dt, string outputFolder, string baseFileName)
         {
-            if (dt == null || dt.Rows.Count == 0) throw new ArgumentException("DataTable is null or empty.");
+            if (dt == null || dt.Rows.Count == 0)
+            {
+                Console.WriteLine("DataTable is null or empty.");
+                return;
+            }
 
-            // Configs (adjust if needed)
+            // Config
             string dateCol = "AppliedOn";
             string appIdCol = "ApplicationID";
             string appNameCol = "ApplicationName";
             string categoryCol = "Category";
             string monthKeyCol = "ApplicationMonth"; // helper column
-            string reportSheetName = "Report";
             string dataSheetName = "Data";
+            string distinctSheetName = "DistinctData";
+            string reportSheetName = "Report";
             string pivotName = "MonthlyPivot";
             string pivotStartCell = "A7";
             string titleCell = "A5";
@@ -42,16 +46,17 @@ namespace DataModelPivotFinal
 
             Directory.CreateDirectory(outputFolder);
             string timestamp = DateTime.Now.ToString("yyyyMMdd_HHmmss");
-            string outputFile = Path.Combine(outputFolder, $"{outputBaseFileName}_{timestamp}.xlsx");
+            string outputFile = Path.Combine(outputFolder, $"{baseFileName}_{timestamp}.xlsx");
 
             Excel.Application excelApp = null;
             Excel.Workbook workbook = null;
             Excel.Worksheet dataSheet = null;
+            Excel.Worksheet distinctSheet = null;
             Excel.Worksheet reportSheet = null;
 
             try
             {
-                // 1) Prepare DataTable copy and add month helper column (string "MMM-yyyy")
+                // 1) Add helper column ApplicationMonth to a copy of the DataTable
                 DataTable dt2 = dt.Copy();
                 if (!dt2.Columns.Contains(monthKeyCol))
                     dt2.Columns.Add(monthKeyCol, typeof(string));
@@ -67,151 +72,78 @@ namespace DataModelPivotFinal
                     DateTime d;
                     if (raw is DateTime) d = (DateTime)raw;
                     else if (!DateTime.TryParse(raw.ToString(), out d)) d = DateTime.MinValue;
-                    dt2.Rows[r][monthKeyCol] = d == DateTime.MinValue ? "" : d.ToString("MMM-yyyy");
+
+                    dt2.Rows[r][monthKeyCol] = d == DateTime.MinValue ? "" : d.ToString("MMM-yyyy"); // e.g., Jan-2025
                 }
 
-                // 2) Start Excel
+                // 2) Build a distinct table with only the columns we need to determine uniqueness
+                // Distinct by ApplicationMonth + ApplicationID + ApplicationName + Category
+                DataView dv = new DataView(dt2);
+                DataTable dtDistinct = dv.ToTable(true, monthKeyCol, appIdCol, appNameCol, categoryCol);
+
+                // 3) Start Excel
                 excelApp = new Excel.Application
                 {
                     Visible = false,
                     DisplayAlerts = false
                 };
-
                 workbook = excelApp.Workbooks.Add();
+
+                // 4) Write original dt2 to "Data" sheet (optional; helpful for raw records)
                 dataSheet = (Excel.Worksheet)workbook.Worksheets[1];
                 dataSheet.Name = dataSheetName;
+                WriteDataTableToSheet(dt2, dataSheet, headerRow: 3, dataStartRow: 4);
 
-                // 3) Write headers at row 3 and data from row 4 in one shot (fast)
-                int headerRow = 3;
-                int dataStartRow = headerRow + 1;
-                int cols = dt2.Columns.Count;
-                int rows = dt2.Rows.Count;
+                // 5) Write distinct table to "DistinctData" sheet (pivot source)
+                distinctSheet = (Excel.Worksheet)workbook.Worksheets.Add(After: workbook.Worksheets[workbook.Worksheets.Count]);
+                distinctSheet.Name = distinctSheetName;
+                WriteDataTableToSheet(dtDistinct, distinctSheet, headerRow: 1, dataStartRow: 2);
 
-                for (int c = 0; c < cols; c++)
-                {
-                    dataSheet.Cells[headerRow, c + 1] = dt2.Columns[c].ColumnName;
-                    ((Excel.Range)dataSheet.Cells[headerRow, c + 1]).Font.Bold = true;
-                }
-
-                object[,] arr = new object[rows, cols];
-                for (int r = 0; r < rows; r++)
-                    for (int c = 0; c < cols; c++)
-                        arr[r, c] = dt2.Rows[r][c] == DBNull.Value ? null : dt2.Rows[r][c];
-
-                Excel.Range startCell = (Excel.Range)dataSheet.Cells[dataStartRow, 1];
-                Excel.Range endCell = (Excel.Range)dataSheet.Cells[headerRow + rows, cols];
-                Excel.Range writeRange = dataSheet.Range[startCell, endCell];
-                writeRange.Value2 = arr;
-                dataSheet.Columns.AutoFit();
-
-                // 4) Create ListObject (Excel Table) for the range (header + data)
-                string lastCol = GetExcelColumnName(cols);
-                string tableAddress = $"A{headerRow}:{lastCol}{headerRow + rows}";
-                Excel.Range tableRange = dataSheet.Range[tableAddress];
-
-                Excel.ListObject listObj = dataSheet.ListObjects.Add(
-                    Excel.XlListObjectSourceType.xlSrcRange,
-                    tableRange,
-                    Type.Missing,
-                    Excel.XlYesNoGuess.xlYes,
-                    Type.Missing);
-
-                // ensure table has the requested name, or append timestamp if exists
-                try { listObj.Name = tableName; } catch { listObj.Name = tableName + "_" + DateTime.Now.ToString("yyyyMMddHHmmss"); }
-
-                // 5) Save workbook first — important so workbook.FullName exists for connection
-                workbook.SaveAs(outputFile, Excel.XlFileFormat.xlOpenXMLWorkbook);
-
-                // 6) Create a Workbook Connection referencing the table and promote to Data Model
-                Excel.WorkbookConnections connections = workbook.Connections;
-                string connName = "Conn_" + tableName + "_" + DateTime.Now.ToString("yyyyMMddHHmmss");
-                Excel.WorkbookConnection conn = null;
-
-                try
-                {
-                    // Add2 is preferred
-                    conn = connections.Add2(
-                        connName,
-                        "Data Model connection",
-                        $"WORKSHEET;{workbook.FullName}",
-                        listObj.Name,
-                        (int)Excel.XlCmdType.xlCmdExcel);
-                }
-                catch
-                {
-                    // fallback to Add
-                    conn = connections.Add(connName, "Data Model connection (fallback)", $"WORKSHEET;{workbook.FullName}", listObj.Name);
-                }
-
-                // Try to promote to data model by setting ModelTableName
-                try
-                {
-                    conn.ModelTableName = listObj.Name;
-                }
-                catch
-                {
-                    // some builds do not allow direct setting; it's okay — Excel may still add the model table
-                }
-
-                // Small pause can help Excel process the connection
-                System.Threading.Thread.Sleep(400);
-
-                // 7) Create PivotCache as external using the connection. Use conn object or name
-                Excel.PivotCaches pivotCaches = workbook.PivotCaches();
-                Excel.PivotCache pc = null;
-                try
-                {
-                    pc = pivotCaches.Create(Excel.XlPivotTableSourceType.xlExternal, conn, Excel.XlPivotTableVersionList.xlPivotTableVersion15);
-                }
-                catch
-                {
-                    // fallback: pass connection name
-                    try
-                    {
-                        pc = pivotCaches.Create(Excel.XlPivotTableSourceType.xlExternal, conn.Name, Excel.XlPivotTableVersionList.xlPivotTableVersion15);
-                    }
-                    catch (Exception ex)
-                    {
-                        throw new Exception("Could not create PivotCache from connection. " + ex.Message);
-                    }
-                }
-
-                // 8) Create Report sheet and place pivot at A7
+                // 6) Create Report sheet with Title
                 reportSheet = (Excel.Worksheet)workbook.Worksheets.Add(After: workbook.Worksheets[workbook.Worksheets.Count]);
                 reportSheet.Name = reportSheetName;
-
                 reportSheet.Range[titleCell].Value2 = titleText;
                 reportSheet.Range[titleCell].Font.Bold = true;
                 reportSheet.Range[titleCell].Font.Size = 14;
                 reportSheet.Range[titleCell + ":" + "C5"].Merge();
                 reportSheet.Range[titleCell + ":" + "C5"].HorizontalAlignment = Excel.XlHAlign.xlHAlignCenter;
 
-                Excel.Range pivotDest = reportSheet.Range[pivotStartCell];
+                // 7) Create PivotCache from the DistinctData range (regular pivot, xlDatabase)
+                int distinctCols = dtDistinct.Columns.Count;
+                int distinctRows = dtDistinct.Rows.Count;
+                string lastColLetter = GetExcelColumnName(distinctCols);
+                string distinctRangeAddress = $"A1:{lastColLetter}{1 + distinctRows}"; // header at row1
+                Excel.Range distinctRange = distinctSheet.Range[distinctRangeAddress];
 
+                Excel.PivotCaches pivotCaches = workbook.PivotCaches();
+                Excel.PivotCache pc = pivotCaches.Create(
+                    Excel.XlPivotTableSourceType.xlDatabase,
+                    distinctRange,
+                    Excel.XlPivotTableVersionList.xlPivotTableVersion15);
+
+                // 8) Create PivotTable on Report sheet at A7
+                Excel.Range pivotDest = reportSheet.Range[pivotStartCell];
                 Excel.PivotTable pt = pc.CreatePivotTable(pivotDest, pivotName, Type.Missing, Excel.XlPivotTableVersionList.xlPivotTableVersion15);
 
-                // 9) Configure Pivot fields:
-                // Row1: monthKeyCol
+                // 9) Configure pivot: rows ApplicationMonth -> ApplicationName -> Category
                 Excel.PivotField pfMonth = (Excel.PivotField)pt.PivotFields(monthKeyCol);
                 pfMonth.Orientation = Excel.XlPivotFieldOrientation.xlRowField;
                 pfMonth.Position = 1;
-                pfMonth.Caption = "Application Month"; // user requested caption
+                pfMonth.Caption = "Application Month"; // custom row header
 
-                // Row2: ApplicationName
                 Excel.PivotField pfAppName = (Excel.PivotField)pt.PivotFields(appNameCol);
                 pfAppName.Orientation = Excel.XlPivotFieldOrientation.xlRowField;
                 pfAppName.Position = 2;
 
-                // Row3: Category
                 Excel.PivotField pfCategory = (Excel.PivotField)pt.PivotFields(categoryCol);
                 pfCategory.Orientation = Excel.XlPivotFieldOrientation.xlRowField;
                 pfCategory.Position = 3;
 
-                // 10) Add Distinct Count on ApplicationID (requires Data Model)
-                Excel.PivotField pfData = (Excel.PivotField)pt.AddDataField(pt.PivotFields(appIdCol), "Distinct Applications", Excel.XlConsolidationFunction.xlDistinctCount);
-                try { pfData.NumberFormat = "#,##0"; } catch { }
+                // 10) Values: Count of ApplicationID (on distinct dataset this yields distinct count)
+                Excel.PivotField pfValues = (Excel.PivotField)pt.AddDataField(pt.PivotFields(appIdCol), "Distinct Applications", Excel.XlConsolidationFunction.xlCount);
+                try { pfValues.NumberFormat = "#,##0"; } catch { }
 
-                // 11) Layout & cosmetics
+                // 11) Layout & formatting
                 pt.RowAxisLayout(Excel.XlLayoutRowType.xlCompactRow);
                 pt.DisplayFieldCaptions = true;
                 pt.ShowDrillIndicators = true;
@@ -219,58 +151,48 @@ namespace DataModelPivotFinal
                 pt.RowGrand = true;
                 try { pt.TableStyle2 = "PivotStyleLight16"; } catch { }
 
-                // Hide subtotals for category level
+                // hide subtotals on category
                 try
                 {
                     pfCategory.Subtotals = new bool[] { false, false, false, false, false, false, false, false, false, false, false, false };
                 }
                 catch { }
 
-                // Indent category (if supported)
+                // indent category if supported
                 try { pfCategory.Indent = 2; } catch { }
 
-                // Repeat labels (if supported)
+                // repeat labels ON if available
                 try { pt.RepeatAllLabels(Excel.XlPivotFieldOrientation.xlRowField); } catch { }
 
-                // Autofit report sheet columns
                 reportSheet.Columns.AutoFit();
 
-                // Footer placement (F1): last used row + 2
+                // 12) Footer "Internal" below pivot (F1 style: last used row + 2)
                 int lastUsed = reportSheet.UsedRange.Rows.Count;
                 int footerRow = lastUsed + 2;
                 reportSheet.Cells[footerRow, 1] = footerText;
                 ((Excel.Range)reportSheet.Cells[footerRow, 1]).Font.Italic = true;
                 ((Excel.Range)reportSheet.Cells[footerRow, 1]).Font.Size = 10;
 
-                // Refresh pivot and set refresh on open (best-effort)
-                try
-                {
-                    pt.RefreshTable();
-                    workbook.RefreshAll();
-                }
-                catch { }
+                // 13) Save workbook
+                // remove file if exists
+                if (File.Exists(outputFile)) File.Delete(outputFile);
+                workbook.SaveAs(outputFile);
+                Console.WriteLine("Saved: " + outputFile);
 
-                // Save final workbook (ensures pivot parts persisted)
-                workbook.Save();
-
-                Console.WriteLine("Saved file: " + outputFile);
-            }
-            catch (COMException comEx)
-            {
-                Console.WriteLine("COM exception: " + comEx.Message);
-                Console.WriteLine(comEx.StackTrace);
-                throw;
+                // 14) Optionally make visible
+                // excelApp.Visible = true;
             }
             catch (Exception ex)
             {
-                Console.WriteLine("Exception: " + ex.Message);
+                Console.WriteLine("Error: " + ex.Message);
                 Console.WriteLine(ex.StackTrace);
                 throw;
             }
             finally
             {
-                // Cleanup COM objects carefully
+                // Cleanup COM objects
                 try { if (reportSheet != null) Marshal.FinalReleaseComObject(reportSheet); } catch { }
+                try { if (distinctSheet != null) Marshal.FinalReleaseComObject(distinctSheet); } catch { }
                 try { if (dataSheet != null) Marshal.FinalReleaseComObject(dataSheet); } catch { }
 
                 try
@@ -300,7 +222,35 @@ namespace DataModelPivotFinal
             }
         }
 
-        // Helper: convert 1-based column index to Excel column letters
+        // Helper: write DataTable to a worksheet fast (headers + data)
+        private static void WriteDataTableToSheet(DataTable dt, Excel.Worksheet ws, int headerRow, int dataStartRow)
+        {
+            int cols = dt.Columns.Count;
+            int rows = dt.Rows.Count;
+
+            // headers
+            for (int c = 0; c < cols; c++)
+            {
+                ws.Cells[headerRow, c + 1] = dt.Columns[c].ColumnName;
+                ((Excel.Range)ws.Cells[headerRow, c + 1]).Font.Bold = true;
+            }
+
+            // build array
+            object[,] arr = new object[rows, cols];
+            for (int r = 0; r < rows; r++)
+                for (int c = 0; c < cols; c++)
+                    arr[r, c] = dt.Rows[r][c] == DBNull.Value ? null : dt.Rows[r][c];
+
+            Excel.Range startCell = ws.Cells[dataStartRow, 1];
+            Excel.Range endCell = ws.Cells[dataStartRow + rows - 1, cols];
+            Excel.Range writeRange = ws.Range[startCell, endCell];
+            writeRange.Value2 = arr;
+
+            // autofit
+            ws.Columns.AutoFit();
+        }
+
+        // Helper: convert index -> Excel column (1 => A)
         private static string GetExcelColumnName(int columnNumber)
         {
             if (columnNumber < 1) throw new ArgumentOutOfRangeException(nameof(columnNumber));
@@ -315,10 +265,10 @@ namespace DataModelPivotFinal
             return columnName;
         }
 
-        // Sample DataTable for quick testing
+        // Sample test data
         private static DataTable GetSampleDataTable()
         {
-            DataTable dt = new DataTable();
+            var dt = new DataTable();
             dt.Columns.Add("ApplicationID", typeof(string));
             dt.Columns.Add("AppliedOn", typeof(DateTime));
             dt.Columns.Add("ApplicationName", typeof(string));
