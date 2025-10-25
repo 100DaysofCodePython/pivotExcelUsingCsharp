@@ -1,0 +1,132 @@
+using System;
+using System.Data;
+using System.IO;
+using Excel = Microsoft.Office.Interop.Excel;
+
+namespace MonthlyPivotReport
+{
+    class Program
+    {
+        static void Main()
+        {
+            string folderPath = @"C:\Reports\Pivot\";
+            string filePath = Path.Combine(folderPath, "MonthlyPivot.xlsx");
+
+            if (!Directory.Exists(folderPath))
+                Directory.CreateDirectory(folderPath);
+
+            // --- Sample DataTable ---
+            DataTable dt = new DataTable("ApplicationsTbl");
+            dt.Columns.Add("ApplicationID", typeof(int));
+            dt.Columns.Add("AppliedOn", typeof(DateTime));
+            dt.Columns.Add("ApplicationName", typeof(string));
+            dt.Columns.Add("Category", typeof(string));
+
+            dt.Rows.Add(1, new DateTime(2025, 1, 10), "App A", "Banking");
+            dt.Rows.Add(2, new DateTime(2025, 1, 15), "App B", "Finance");
+            dt.Rows.Add(3, new DateTime(2025, 2, 11), "App C", "Finance");
+            dt.Rows.Add(1, new DateTime(2025, 2, 12), "App A", "Banking");
+            dt.Rows.Add(4, new DateTime(2025, 3, 5), "App D", "Security");
+
+            Excel.Application xlApp = new Excel.Application();
+            xlApp.DisplayAlerts = false;
+
+            Excel.Workbook wb = xlApp.Workbooks.Add();
+            Excel.Worksheet dataWs = wb.Sheets[1];
+            dataWs.Name = "ApplicationsTbl";
+
+            // --- Fast write DataTable to Excel (no loops) ---
+            object[,] data = new object[dt.Rows.Count + 1, dt.Columns.Count];
+            for (int c = 0; c < dt.Columns.Count; c++)
+                data[0, c] = dt.Columns[c].ColumnName;
+
+            for (int r = 0; r < dt.Rows.Count; r++)
+                for (int c = 0; c < dt.Columns.Count; c++)
+                    data[r + 1, c] = dt.Rows[r][c];
+
+            Excel.Range startCell = dataWs.Cells[1, 1];
+            Excel.Range endCell = dataWs.Cells[dt.Rows.Count + 1, dt.Columns.Count];
+            Excel.Range writeRange = dataWs.Range[startCell, endCell];
+            writeRange.Value2 = data;
+
+            // Format header row
+            Excel.Range headerRow = dataWs.Range["A1", dataWs.Cells[1, dt.Columns.Count]];
+            headerRow.Font.Bold = true;
+            headerRow.Interior.Color = System.Drawing.ColorTranslator.ToOle(System.Drawing.Color.LightGray);
+            dataWs.Columns.AutoFit();
+
+            // --- Add Pivot Sheet ---
+            Excel.Worksheet pivotWs = wb.Sheets.Add(After: dataWs);
+            pivotWs.Name = "MonthlyPivot";
+
+            string pivotName = "PivotTable1";
+            string tableRange = $"A1:{GetExcelColumnName(dt.Columns.Count)}{dt.Rows.Count + 1}";
+            Excel.Range sourceRange = dataWs.Range[tableRange];
+
+            Excel.PivotCache pivotCache = wb.PivotCaches().Create(
+                SourceType: Excel.XlPivotTableSourceType.xlDatabase,
+                SourceData: sourceRange);
+
+            Excel.PivotTable pt = pivotCache.CreatePivotTable(
+                TableDestination: pivotWs.Range["A5"],
+                TableName: pivotName);
+
+            // --- Pivot Field Configuration ---
+            Excel.PivotField dateField = pt.PivotFields("AppliedOn");
+            dateField.Orientation = Excel.XlPivotFieldOrientation.xlRowField;
+            dateField.NumberFormat = "mmm yyyy";
+            dateField.Position = 1;
+
+            Excel.PivotField catField = pt.PivotFields("Category");
+            catField.Orientation = Excel.XlPivotFieldOrientation.xlRowField;
+            catField.Position = 2;
+
+            Excel.PivotField appField = pt.PivotFields("ApplicationName");
+            appField.Orientation = Excel.XlPivotFieldOrientation.xlRowField;
+            appField.Position = 3;
+
+            Excel.PivotField valueField = pt.AddDataField(
+                pt.PivotFields("ApplicationID"),
+                "Distinct Applications",
+                Excel.XlConsolidationFunction.xlDistinctCount);
+
+            // --- Formatting ---
+            pt.RowAxisLayout(Excel.XlLayoutRowType.xlCompactRow);
+            pt.DisplayFieldCaptions = true;
+            pt.ShowDrillIndicators = true;
+            pt.HasAutoFormat = true;
+            pt.ColumnGrand = true;
+            pt.RowGrand = true;
+            pt.TableStyle2 = "PivotStyleMedium9";
+            pt.CompactLayoutRowHeader = "Application Data";
+            pt.CompactLayoutIndent = 2;
+
+            pivotWs.Range["A3"].Value2 = "Monthly Application Onboarding Report";
+            pivotWs.Range["A3"].Font.Bold = true;
+            pivotWs.Range["A3"].Font.Size = 14;
+
+            // --- Label as Internal ---
+            wb.BuiltinDocumentProperties["Category"].Value = "Internal";
+
+            // --- Save ---
+            wb.SaveAs(filePath);
+            wb.Close();
+            xlApp.Quit();
+
+            Console.WriteLine($"✅ Report generated: {filePath}");
+        }
+
+        // --- Helper to get Excel Column Letter (A, B, C...) ---
+        static string GetExcelColumnName(int columnNumber)
+        {
+            string columnName = "";
+            while (columnNumber > 0)
+            {
+                int modulo = (columnNumber - 1) % 26;
+                columnName = Convert.ToChar(65 + modulo) + columnName;
+                columnNumber = (columnNumber - modulo) / 26;
+            }
+            return columnName;
+        }
+    }
+}
