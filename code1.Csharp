@@ -199,3 +199,129 @@ builder.Build_Part1(
         // Note: do NOT release app/workbook/ws here — PART 2 expects them to still be alive.
     }
 }
+
+
+// PART 2 : Build Pivot with REAL DistinctCount
+using System;
+using Excel = Microsoft.Office.Interop.Excel;
+using System.Runtime.InteropServices;
+
+public class PivotPart2
+{
+    public void BuildPivot_Part2(
+        Excel.Application excelApp,
+        Excel.Workbook workbook,
+        Excel.Worksheet dataSheet,
+        string tableName,
+        string reportSheetName,
+        string titleText,
+        string distinctColumnName,
+        int headerRow,
+        int lastDataRow,
+        string savePath)
+    {
+        if (excelApp == null || workbook == null || dataSheet == null)
+            throw new ArgumentNullException("PART1 objects must not be null.");
+
+        // ---- 1) locate ListObject
+        Excel.ListObject lo = null;
+        foreach (Excel.ListObject item in dataSheet.ListObjects)
+        {
+            if (item.Name.Equals(tableName, StringComparison.OrdinalIgnoreCase))
+            {
+                lo = item;
+                break;
+            }
+        }
+        if (lo == null)
+            throw new Exception($"ListObject '{tableName}' not found on sheet {dataSheet.Name}.");
+
+        // ---- 2) add helper column for TRUE distinct count
+        Excel.ListColumn helperCol = null;
+        try
+        {
+            helperCol = lo.ListColumns.Add();
+            helperCol.Name = "_DistinctKey";
+        }
+        catch
+        {
+            // Already exists => reuse
+            foreach (Excel.ListColumn c in lo.ListColumns)
+                if (c.Name == "_DistinctKey") helperCol = c;
+        }
+
+        // Put formula =ApplicationID (or the column user selected)
+        int colIndex = 0;
+        for (int i = 1; i <= lo.ListColumns.Count; i++)
+        {
+            if (lo.ListColumns[i].Name.Equals(distinctColumnName, StringComparison.OrdinalIgnoreCase))
+            {
+                colIndex = i;
+                break;
+            }
+        }
+        if (colIndex == 0)
+            throw new Exception($"Column {distinctColumnName} not found in the table.");
+
+        string colLetter = GetColumnLetter(lo.Range.Column + colIndex - 1);
+        string keyColLetter = GetColumnLetter(helperCol.Range.Column);
+
+        helperCol.DataBodyRange.Formula = $"=[@{distinctColumnName}]";
+
+        // ---- 3) create Report sheet
+        Excel.Worksheet rptSheet = null;
+        try
+        {
+            rptSheet = (Excel.Worksheet)workbook.Worksheets[reportSheetName];
+        }
+        catch
+        {
+            rptSheet = (Excel.Worksheet)workbook.Worksheets.Add();
+            rptSheet.Name = reportSheetName;
+        }
+        rptSheet.Cells.Clear();
+
+        // ---- 4) add pivot cache & table
+        Excel.PivotCache pc = workbook.PivotCaches().Create(
+            Excel.XlPivotTableSourceType.xlDatabase,
+            lo.Range);
+
+        Excel.PivotTable pt = pc.CreatePivotTable(
+            TableDestination: rptSheet.Range["A5"],
+            TableName: "MonthlyPivot"
+        );
+
+        // ---- 5) add row/date fields & distinct calculation
+        var dateField = pt.PivotFields("AppliedOn");
+        dateField.Orientation = Excel.XlPivotFieldOrientation.xlRowField;
+
+        var nameField = pt.PivotFields("ApplicationName");
+        nameField.Orientation = Excel.XlPivotFieldOrientation.xlRowField;
+
+        var distinctField = pt.PivotFields("_DistinctKey");
+        distinctField.Orientation = Excel.XlPivotFieldOrientation.xlDataField;
+        distinctField.Function = Excel.XlConsolidationFunction.xlCount;
+        distinctField.Name = "Distinct Applications";
+
+        // ---- 6) place report title
+        rptSheet.Range["A1"].Value2 = titleText;
+        rptSheet.Range["A1"].Font.Bold = true;
+        rptSheet.Range["A1"].Font.Size = 16;
+
+        // ---- 7) Save and done
+        workbook.SaveAs(savePath);
+    }
+
+    private string GetColumnLetter(int columnNumber)
+    {
+        string columnString = "";
+        while (columnNumber > 0)
+        {
+            int currentLetterNumber = (columnNumber - 1) % 26;
+            char currentLetter = (char)(currentLetterNumber + 65);
+            columnString = currentLetter + columnString;
+            columnNumber = (columnNumber - (currentLetterNumber + 1)) / 26;
+        }
+        return columnString;
+    }
+}
