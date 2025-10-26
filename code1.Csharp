@@ -1,0 +1,201 @@
+
+
+// Then call PART 2 passing these objects
+// PART 1: write DataTable -> Excel, create ListObject, save workbook
+// Requires: Microsoft.Office.Interop.Excel reference
+using System;
+using System.Data;
+using System.IO;
+using System.Runtime.InteropServices;
+using Excel = Microsoft.Office.Interop.Excel;
+
+public class PivotPart1
+{
+    // Helper: convert 1-based column index to Excel column letters
+    private static string GetExcelColumnName(int columnNumber)
+    {
+        if (columnNumber < 1) throw new ArgumentOutOfRangeException(nameof(columnNumber));
+        string columnName = String.Empty;
+        while (columnNumber > 0)
+        {
+            columnNumber--;
+            int remainder = columnNumber % 26;
+            columnName = (char)('A' + remainder) + columnName;
+            columnNumber = columnNumber / 26;
+        }
+        return columnName;
+    }
+var builder = new PivotPart1();
+Excel.Application excelApp;
+Excel.Workbook workbook;
+Excel.Worksheet dataSheet;
+int headerRow, dataStartRow, lastDataRow;
+
+builder.Build_Part1(
+    dt: yourDataTable,
+    outputFolder: @"C:\Reports\Pivot\",
+    outputFileName: "Application_DistinctCount_Report_2025.xlsx",
+    tableName: "ApplicationsTbl",
+    out excelApp,
+    out workbook,
+    out dataSheet,
+    out headerRow,
+    out dataStartRow,
+    out lastDataRow
+);
+    /// <summary>
+    /// Writes the DataTable into an Excel workbook (sheet named "Applications"), creates an Excel Table,
+    /// saves workbook to disk, and returns the COM objects for PART 2. Does NOT release COM objects.
+    /// </summary>
+    /// <param name="dt">Source DataTable (must have the expected columns)</param>
+    /// <param name="outputFolder">Folder where workbook will be saved (must exist or will be created)</param>
+    /// <param name="outputFileName">Filename to save (e.g. Application_DistinctCount_Report_2025.xlsx)</param>
+    /// <param name="tableName">Desired Excel table name (one word, e.g. ApplicationsTbl)</param>
+    /// <param name="excelApp">out Excel.Application (caller must release in PART 2)</param>
+    /// <param name="workbook">out Workbook</param>
+    /// <param name="dataSheet">out Worksheet (Applications)</param>
+    /// <param name="headerRow">out header row index (3)</param>
+    /// <param name="dataStartRow">out data start row index (4)</param>
+    /// <param name="lastDataRow">out last used data row</param>
+    public void Build_Part1(
+        DataTable dt,
+        string outputFolder,
+        string outputFileName,
+        string tableName,
+        out Excel.Application excelApp,
+        out Excel.Workbook workbook,
+        out Excel.Worksheet dataSheet,
+        out int headerRow,
+        out int dataStartRow,
+        out int lastDataRow)
+    {
+        // init outs
+        excelApp = null;
+        workbook = null;
+        dataSheet = null;
+        headerRow = 3;
+        dataStartRow = 4;
+        lastDataRow = 3;
+
+        if (dt == null) throw new ArgumentNullException(nameof(dt));
+        if (string.IsNullOrWhiteSpace(outputFolder)) throw new ArgumentNullException(nameof(outputFolder));
+        if (string.IsNullOrWhiteSpace(outputFileName)) throw new ArgumentNullException(nameof(outputFileName));
+        if (string.IsNullOrWhiteSpace(tableName)) throw new ArgumentNullException(nameof(tableName));
+
+        Directory.CreateDirectory(outputFolder);
+        string outputPath = Path.Combine(outputFolder, outputFileName);
+
+        // Start Excel
+        Excel.Application app = null;
+        Excel.Workbook wb = null;
+        Excel.Worksheet ws = null;
+
+        try
+        {
+            app = new Excel.Application
+            {
+                Visible = false,
+                DisplayAlerts = false
+            };
+
+            wb = app.Workbooks.Add();
+            ws = (Excel.Worksheet)wb.Worksheets[1];
+
+            // Rename sheet to "Applications" (as requested)
+            string dataSheetName = "Applications";
+            try { ws.Name = dataSheetName; } catch { /* ignore if name exists */ }
+
+            // Title (optional on data sheet)
+            // We'll place report title on Report sheet later; keep Data sheet minimal.
+
+            // 1) write headers at row 3
+            int cols = dt.Columns.Count;
+            int rows = dt.Rows.Count;
+            headerRow = 3;
+            dataStartRow = headerRow + 1;
+
+            for (int c = 0; c < cols; c++)
+            {
+                ws.Cells[headerRow, c + 1] = dt.Columns[c].ColumnName;
+                ((Excel.Range)ws.Cells[headerRow, c + 1]).Font.Bold = true;
+            }
+
+            // 2) build one-shot object[,] and write starting at row 4
+            object[,] arr = new object[rows, cols];
+            for (int r = 0; r < rows; r++)
+            {
+                for (int c = 0; c < cols; c++)
+                {
+                    var val = dt.Rows[r][c];
+                    arr[r, c] = (val == DBNull.Value) ? null : val;
+                }
+            }
+
+            Excel.Range startCell = (Excel.Range)ws.Cells[dataStartRow, 1];
+            Excel.Range endCell = (Excel.Range)ws.Cells[headerRow + rows, cols];
+            Excel.Range writeRange = ws.Range[startCell, endCell];
+            writeRange.Value2 = arr;
+
+            // Autofit columns
+            ws.Columns.AutoFit();
+
+            // 3) Create Excel Table (ListObject) that includes header+data
+            string lastColLetter = GetExcelColumnName(cols);
+            string tableAddress = $"A{headerRow}:{lastColLetter}{headerRow + rows}";
+            Excel.Range tableRange = ws.Range[tableAddress];
+
+            Excel.ListObject listObj = ws.ListObjects.Add(
+                Excel.XlListObjectSourceType.xlSrcRange,
+                tableRange,
+                Type.Missing,
+                Excel.XlYesNoGuess.xlYes,
+                Type.Missing);
+
+            // ensure table has requested name (if exists, append timestamp)
+            try
+            {
+                listObj.Name = tableName;
+            }
+            catch
+            {
+                listObj.Name = tableName + "_" + DateTime.Now.ToString("yyyyMMddHHmmss");
+            }
+
+            // 4) Save workbook now (some interop behaviors require a saved workbook to create model/connection later)
+            // If file exists, overwrite (caller earlier selected overwrite behavior)
+            try
+            {
+                if (File.Exists(outputPath))
+                {
+                    File.Delete(outputPath);
+                }
+                wb.SaveAs(outputPath, Excel.XlFileFormat.xlOpenXMLWorkbook);
+            }
+            catch (COMException)
+            {
+                // fallback: workbook.Save (try to save with default name)
+                wb.Save();
+            }
+
+            // Populate out params for PART 2
+            excelApp = app;
+            workbook = wb;
+            dataSheet = ws;
+            headerRow = headerRow;
+            dataStartRow = dataStartRow;
+            lastDataRow = headerRow + rows;
+        }
+        catch
+        {
+            // If exception, ensure we attempt cleanup of COM objects to avoid orphan excel.exe
+            try { if (ws != null) Marshal.FinalReleaseComObject(ws); } catch { }
+            try { if (workbook != null) { workbook.Close(false); Marshal.FinalReleaseComObject(workbook); } } catch { }
+            try { if (app != null) { app.Quit(); Marshal.FinalReleaseComObject(app); } } catch { }
+            GC.Collect();
+            GC.WaitForPendingFinalizers();
+            throw;
+        }
+
+        // Note: do NOT release app/workbook/ws here — PART 2 expects them to still be alive.
+    }
+}
