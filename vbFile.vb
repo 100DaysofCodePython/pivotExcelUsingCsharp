@@ -1,31 +1,38 @@
-Sub CreatePivotWithDistinctCount()
+Sub CreatePivotWithDistinctCount_DataModel()
 
     Dim wb As Workbook
     Dim wsData As Worksheet
     Dim wsPT As Worksheet
-    Dim rng As Range
+    Dim lo As ListObject
     Dim pc As PivotCache
     Dim pt As PivotTable
 
     Set wb = ThisWorkbook
-    Set wsData = wb.Sheets("SalesData") ' Change to your data sheet name
-    Set rng = wsData.Range("A1").CurrentRegion
+    Set wsData = wb.Sheets("SalesData") ' your sheet
 
-    '--- Create connection to Data Model ---
+    ' your range MUST be a ListObject (Excel Table) for Data Model
+    If wsData.ListObjects.Count = 0 Then
+        wsData.ListObjects.Add xlSrcRange, wsData.Range("A1").CurrentRegion, , xlYes
+    End If
+
+    Set lo = wsData.ListObjects(1)
+
+    ' --- Create pivot cache directly with Data Model flag ---
     Set pc = wb.PivotCaches.Create( _
-                SourceType:=xlDatabase, _
-                SourceData:=rng, _
+                SourceType:=xlExternal, _
+                SourceData:=Array("WORKSHEET;" & wb.FullName), _
                 Version:=xlPivotTableVersion15)
 
-    'Important: Add to the Data Model
+    pc.MaintainConnection = True
     pc.EnableRefresh = True
-    pc.Refresh
-    pc.SaveData = True
-    pc.OLAP = True    ' this is what pushes to the Data Model
 
-    '--- Add new sheet for pivot ---
+    ' add the ListObject to the connection
+    pc.CommandType = xlCmdExcel
+    pc.CommandText = lo.Name
+
+    ' --- Create sheet for Pivot ---
     On Error Resume Next
-    Set wsPT = wb.Sheets("SalesPivot")
+    Set wsPT = wb.Worksheets("SalesPivot")
     If wsPT Is Nothing Then
         Set wsPT = wb.Worksheets.Add
         wsPT.Name = "SalesPivot"
@@ -33,26 +40,24 @@ Sub CreatePivotWithDistinctCount()
     On Error GoTo 0
     wsPT.Cells.Clear
 
-    '--- Create pivot table ---
+    ' --- Create PivotTable ---
     Set pt = wsPT.PivotTables.Add( _
-                PivotCache:=pc, _
-                TableDestination:=wsPT.Range("A3"), _
-                TableName:="SalesPivotTable")
+             PivotCache:=pc, _
+             TableDestination:=wsPT.Range("A3"), _
+             TableName:="SalesPivotTable")
 
-    '--- Example fields (Change to your columns) ---
+    ' --- Add fields ---
     With pt
         .PivotFields("Month").Orientation = xlRowField
         .PivotFields("Category").Orientation = xlColumnField
 
-        ' DISTINCT COUNT only works when Data Model connection is OLAP
         Dim pf As PivotField
-        Set pf = .PivotFields("CustomerID")    ' example field
+        Set pf = .PivotFields("CustomerID")
 
         pf.Orientation = xlDataField
-        pf.Function = xlDistinctCount  ' this is the KEY line
+        pf.Function = xlDistinctCount     ' DISTINCT COUNT now appears ✅
         pf.Name = "Distinct Customers"
     End With
 
-    MsgBox "Pivot with distinct count created successfully!", vbInformation
-
+    MsgBox "Pivot with Data Model distinct count created!", vbInformation
 End Sub
